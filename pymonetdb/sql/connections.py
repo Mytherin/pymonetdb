@@ -7,6 +7,8 @@
 import logging
 import platform
 
+from six import PY2
+
 from pymonetdb.sql import cursors
 from pymonetdb import exceptions
 from pymonetdb import mapi
@@ -142,7 +144,9 @@ class Connection(object):
     def command(self, command):
         """ use this function to send low level mapi commands """
         self.__mapi_check()
-        return self.mapi.cmd(command)
+        if PY2:
+            command = unicode(command, 'utf8')
+        return self.mapi.cmd(command.encode('utf8'))
 
     def __mapi_check(self):
         """ check if there is a connection with a server """

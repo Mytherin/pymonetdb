@@ -869,12 +869,13 @@ class Cursor(object):
             # consume the explicit flush we perform after every chunk
             return True
 
+        block = block.decode()
         for line in block.split("\n"):
-            if line.startswith(mapi.MSG_INFO):
+            if line.startswith(mapi.MSG_INFO.decode()):
                 logger.info(line[1:])
                 self.messages.append((Warning, line[1:]))
 
-            elif line.startswith(mapi.MSG_QTABLE):
+            elif line.startswith(mapi.MSG_QTABLE.decode()):
                 self._query_id, rowcount, columns, tuples = line[2:].split()[:4]
 
                 columns = int(columns)   # number of columns in result
@@ -896,7 +897,7 @@ class Cursor(object):
                 self._offset = 0
                 self.lastrowid = None
 
-            elif line.startswith(mapi.MSG_HEADER):
+            elif line.startswith(mapi.MSG_HEADER.decode()):
                 (data, identity) = line[1:].split("#")
                 values = [x.strip() for x in data.split(",")]
                 identity = identity.strip()
@@ -929,24 +930,24 @@ class Cursor(object):
                 self._offset = 0
                 self.lastrowid = None
 
-            elif line.startswith(mapi.MSG_TUPLE):
+            elif line.startswith(mapi.MSG_TUPLE.decode()):
                 values = self._parse_tuple(line)
                 self._rows.append(values)
 
-            elif line.startswith(mapi.MSG_TUPLE_NOSLICE):
+            elif line.startswith(mapi.MSG_TUPLE_NOSLICE.decode()):
                 self._rows.append((line[1:],))
 
-            elif line.startswith(mapi.MSG_QBLOCK):
+            elif line.startswith(mapi.MSG_QBLOCK.decode()):
                 self._rows = []
 
-            elif line.startswith(mapi.MSG_QSCHEMA):
+            elif line.startswith(mapi.MSG_QSCHEMA.decode()):
                 self._offset = 0
                 self.lastrowid = None
                 self._rows = []
                 self.description = None
                 self.rowcount = -1
 
-            elif line.startswith(mapi.MSG_QUPDATE):
+            elif line.startswith(mapi.MSG_QUPDATE.decode()):
                 (affected, identity) = line[2:].split()[:2]
                 self._offset = 0
                 self._rows = []
@@ -955,17 +956,17 @@ class Cursor(object):
                 self.lastrowid = int(identity)
                 self._query_id = -1
 
-            elif line.startswith(mapi.MSG_QTRANS):
+            elif line.startswith(mapi.MSG_QTRANS.decode()):
                 self._offset = 0
                 self.lastrowid = None
                 self._rows = []
                 self.description = None
                 self.rowcount = -1
 
-            elif line == mapi.MSG_PROMPT:
+            elif line == mapi.MSG_PROMPT.decode():
                 return
 
-            elif line.startswith(mapi.MSG_ERROR):
+            elif line.startswith(mapi.MSG_ERROR.decode()):
                 self._exception_handler(ProgrammingError, line[1:])
         self._exception_handler(InterfaceError, "Unknown state, %s" % block)
 
