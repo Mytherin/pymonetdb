@@ -40,3 +40,6 @@ class TestMonetize(unittest.TestCase):
     def test_timedelta(self):
         x = datetime.timedelta(days=5, hours=2, minutes=10)
         self.assertEqual(convert(x), "INTERVAL '439800' SECOND")
+
+if __name__ == "__main__":
+    unittest.main()

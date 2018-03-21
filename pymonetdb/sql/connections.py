@@ -60,7 +60,7 @@ class Connection(object):
 
         self.set_autocommit(autocommit)
         self.set_sizeheader(True)
-        self.set_replysize(100)
+        self.set_replysize(100000)
 
     def close(self):
         """ Close the connection.

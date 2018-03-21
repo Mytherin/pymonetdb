@@ -356,6 +356,11 @@ class DatabaseTest(unittest.TestCase):
             ('d', 'decimal', None, 9, 9, 4, None),
             ('n', 'varchar', None, 1, None, None, None),
         ]
+        if self.connection.mapi.protocol == pymonetdb.mapi.Protocol.prot10:
+            shouldbe = [
+            ('c', 'varchar', None, -1, 1024, 0, None), 
+            ('d', 'decimal', None, 4, 9, 4, None), 
+            ('n', 'varchar', None, -1, 1, 0, None)]
         try:
             self.cursor.execute("create table %s (c VARCHAR(1024), d DECIMAL(9,4), n VARCHAR(1) NOT NULL)" % self.table);
             self.cursor.execute("insert into %s VALUES ('test', 12345.1234, 'x')" % self.table)
@@ -441,3 +446,6 @@ class DatabaseTest(unittest.TestCase):
         self.cursor.execute("SELECT %(dt)s - %(td)s", {'dt': dt, 'td': td})
         expected = datetime.datetime(2017, 12, 1, 10, 20)
         self.assertEqual(self.cursor.fetchone()[0], expected)
+
+if __name__ == "__main__":
+    unittest.main()

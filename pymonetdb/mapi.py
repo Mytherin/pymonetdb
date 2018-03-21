@@ -19,6 +19,27 @@ from six import BytesIO, PY3
 from pymonetdb.exceptions import OperationalError, DatabaseError,\
     ProgrammingError, NotSupportedError, IntegrityError
 
+from enum import Enum
+
+try:
+    import snappy
+    # there is a different library called "snappy" that is NOT the compression library
+    # hence even on successful import we test if this "snappy" is the correct one
+    if "foo" != snappy.decompress(snappy.compress("foo")):
+        raise ImportException("Snappy is not capable of compressing data!")
+    HAVE_SNAPPY = True
+except:
+    HAVE_SNAPPY = False
+
+class Protocol(Enum):
+    prot9 = 1
+    prot10 = 2
+
+class Compression(Enum):
+    none = 1
+    snappy = 2
+    lz4 = 3
+
 logger = logging.getLogger(__name__)
 
 MAX_PACKAGE_LENGTH = (1024 * 8) - 2
@@ -39,6 +60,9 @@ MSG_TUPLE = "["
 MSG_TUPLE_NOSLICE = "="
 MSG_REDIRECT = "^"
 MSG_OK = "=OK"
+MSG_NEW_RESULT_HEADER = b"*"
+MSG_INITIAL_RESULT_CHUNK = b"+"
+MSG_RESULT_CHUNK = b"-"
 
 STATE_INIT = 0
 STATE_READY = 1
@@ -105,6 +129,9 @@ class Connection(object):
         self.password = ""
         self.database = ""
         self.language = ""
+        self.protocol = Protocol.prot9
+        self.compression = Compression.none
+        self.blocksize = -1
         self.connect_timeout = socket.getdefaulttimeout()
 
     def connect(self, database, username, password, language, hostname=None,
@@ -161,9 +188,12 @@ class Connection(object):
         """ Reads challenge from line, generate response and check if
         everything is okay """
 
-        challenge = self._getblock()
-        response = self._challenge_response(challenge)
-        self._putblock(response)
+        challenge = self._getblock().decode('utf-8')
+        self.blocksize = 1000000
+        (response, protocol, compression) = self._challenge_response(challenge, self.blocksize)
+        self._putblock(response.encode('utf-8'))
+        self.protocol = protocol
+        self.compression = compression
         prompt = self._getblock().strip()
 
         if len(prompt) == 0:
@@ -213,6 +243,44 @@ class Connection(object):
         self.state = STATE_INIT
         self.socket.close()
 
+    def read_response(self):
+        response = self._getblock()
+        if not len(response):
+            return ""
+        if response.startswith(MSG_OK):
+            return response[3:].strip() or ""
+        if response == MSG_MORE:
+            # tell server it isn't going to get more
+            return self.cmd("")
+
+        # If we are performing an update test for errors such as a failed
+        # transaction.
+
+        # We are splitting the response into lines and checking each one if it
+        # starts with MSG_ERROR. If this is the case, find which line records
+        # the error and use it to call handle_error.
+        if response[:2] == MSG_QUPDATE:
+            lines = response.split(b'\n')
+            if any([l.startswith(MSG_ERROR) for l in lines]):
+                index = next(i for i, v in enumerate(lines) if v.startswith(MSG_ERROR))
+                exception, string = handle_error(lines[index][1:])
+                raise exception(string)
+
+        if response[0:1] in [MSG_Q, MSG_HEADER, MSG_TUPLE, MSG_NEW_RESULT_HEADER, MSG_INITIAL_RESULT_CHUNK, MSG_RESULT_CHUNK]:
+            return response
+        elif response[0:1] == MSG_ERROR:
+            exception, string = handle_error(response[1:])
+            raise exception(string)
+        elif response[0:1] == MSG_INFO:
+            logger.info("%s" % (response[1:]))
+        elif self.language == 'control' and not self.hostname:
+            if response.startswith("OK"):
+                return response[2:].strip() or ""
+            else:
+                return response
+        else:
+            raise ProgrammingError("unknown state: %s" % response)
+
     def cmd(self, operation):
         """ put a mapi command on the line"""
         logger.debug("executing command %s" % operation)
@@ -243,7 +311,7 @@ class Connection(object):
                 exception, string = handle_error(lines[index][1:])
                 raise exception(string)
 
-        if response[0] in [MSG_Q, MSG_HEADER, MSG_TUPLE]:
+        if response[0] in [MSG_Q, MSG_HEADER, MSG_TUPLE, MSG_NEW_RESULT_HEADER, MSG_INITIAL_RESULT_CHUNK, MSG_RESULT_CHUNK]:
             return response
         elif response[0] == MSG_ERROR:
             exception, string = handle_error(response[1:])
@@ -258,7 +326,7 @@ class Connection(object):
         else:
             raise ProgrammingError("unknown state: %s" % response)
 
-    def _challenge_response(self, challenge):
+    def _challenge_response(self, challenge, blocksize):
         """ generate a response to a mapi login challenge """
         challenges = challenge.split(':')
         salt, identity, protocol, hashes, endian = challenges[:5]
@@ -268,7 +336,7 @@ class Connection(object):
             algo = challenges[5]
             try:
                 h = hashlib.new(algo)
-                h.update(encode(password))
+                h.update(password.encode())
                 password = h.hexdigest()
             except ValueError as e:
                 raise NotSupportedError(str(e))
@@ -290,8 +358,18 @@ class Connection(object):
             raise NotSupportedError("Unsupported hash algorithms required"
                                     " for login: %s" % hashes)
 
-        return ":".join(["BIG", self.username, pwhash, self.language,
-                         self.database]) + ":"
+        protocol = Protocol.prot9
+        compression = Compression.none
+        response = ["BIG", self.username, pwhash, self.language, self.database]
+        if "PROT10" in h:
+            # protocol 10 is supported
+            protocol = Protocol.prot10
+            _compression = "COMPRESSION_NONE"
+            if self.hostname != "localhost" and "COMPRESSION_SNAPPY" in h and HAVE_SNAPPY:
+                _compression = "COMPRESSION_SNAPPY"
+                compression = Compression.snappy
+            response = ["LIT", self.username, pwhash, self.language, self.database, "PROT10", _compression, str(blocksize)]
+        return (":".join(response) + ":", protocol, compression)
 
     def _getblock(self):
         """ read one mapi encoded block """
@@ -304,12 +382,22 @@ class Connection(object):
         result = BytesIO()
         last = 0
         while not last:
-            flag = self._getbytes(2)
-            unpacked = struct.unpack('<H', flag)[0]  # little endian short
-            length = unpacked >> 1
-            last = unpacked & 1
-            result.write(self._getbytes(length))
-        return decode(result.getvalue())
+            if self.protocol == Protocol.prot9:
+                flag = self._getbytes(2)
+                unpacked = struct.unpack('<H', flag)[0]  # little endian short
+                length = unpacked >> 1
+                last = unpacked & 1
+            else:
+                flag = self._getbytes(8)
+                unpacked = struct.unpack('<q', flag)[0]  # little endian long long
+                length = unpacked >> 1
+                last = unpacked & 1
+            if length > 0:
+                block = self._getbytes(length)
+                if self.compression == Compression.snappy:
+                    block = snappy.uncompress(block)
+                result.write(block)
+        return result.getvalue()
 
     def _getblock_socket(self):
         buffer = BytesIO()
@@ -336,20 +424,24 @@ class Connection(object):
     def _putblock(self, block):
         """ wrap the line in mapi format and put it into the socket """
         if self.language == 'control' and not self.hostname:
-            return self.socket.send(encode(block))  # control doesn't do block splitting when using a socket
+            return self.socket.send(block.encode())  # control doesn't do block splitting when using a socket
         else:
             self._putblock_inet(block)
 
     def _putblock_inet(self, block):
         pos = 0
         last = 0
-        block = encode(block)
         while not last:
             data = block[pos:pos + MAX_PACKAGE_LENGTH]
+            if self.compression == Compression.snappy:
+                data = snappy.compress(data)
             length = len(data)
             if length < MAX_PACKAGE_LENGTH:
                 last = 1
-            flag = struct.pack('<H', (length << 1) + last)
+            if self.protocol == Protocol.prot9:
+                flag = struct.pack('<H', (length << 1) + last)
+            else:
+                flag = struct.pack('<q', (length << 1) + last)
             self.socket.send(flag)
             self.socket.send(data)
             pos += length
